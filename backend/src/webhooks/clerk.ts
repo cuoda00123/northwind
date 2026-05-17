@@ -6,23 +6,27 @@ import { db } from "../db";
 import { users } from "../db/schema";
 import { eq } from "drizzle-orm";
 
-export const clerkWebhookHandler = async (req: Request, res: Response) => {
+export async function clerkWebhookHandler(req: Request, res: Response) {
   const env = getEnv();
 
   try {
+    // webhook verification needs a shared secret; without it we cannot trust incoming POSTs.
     if (!env.CLERK_WEBHOOK_SECRET) {
-      return res.status(400).json({ message: "Missing webhook secret" });
+      res.status(503).send("Webhooks secret is not provided");
+      return;
     }
 
+    // Clerk's verifier expects a Web Request with the raw body; Express may give Buffer or string.
     const payload =
       req.body instanceof Buffer ? req.body.toString("utf8") : String(req.body);
 
-    const request = new Request("https://internal/webhooks/clerk", {
+    const request = new Request("http://internal/webhooks/clerk", {
       method: "POST",
       headers: new Headers(req.headers as HeadersInit),
       body: payload,
     });
 
+    // throws if signature is wrong or body was tampered with; only then we trust evt.
     const evt = await verifyWebhook(request, {
       signingSecret: env.CLERK_WEBHOOK_SECRET,
     });
@@ -61,9 +65,11 @@ export const clerkWebhookHandler = async (req: Request, res: Response) => {
         await db.delete(users).where(eq(users.clerkUserId, id));
       }
     }
+
     res.json({ ok: true });
-  } catch (error) {
-    console.error("Error happen in webhook", error);
-    res.status(500).json({ message: "Internal Server Error" });
+  } catch (err) {
+    // Bad signature, malformed payload, or DB error — do not leak details to the client.
+    console.error("Clerk webhook error", err);
+    res.status(400).json({ error: "Invalid webhook" });
   }
-};
+}
